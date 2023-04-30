@@ -1,0 +1,387 @@
+﻿AWSTemplateFormatVersion: 2010-09-09
+Description: '(SO9169) AWS CloudFormation Sample Template for a VPC with private subnets'
+
+Parameters:
+  #General:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  NamingPrefix:
+    Type: String
+    Description: The prefix to be used for resources created by this template.
+    Default: mr-batch
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  SecondaryRegion:
+    Type: String
+    Description: Enter the Secondary Region
+    Default: "us-west-2"
+
+########################################################################
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      "VPCCidrBlock": 10.1.0.0/16
+      "PrivateCidrBlock1": 10.1.0.0/20
+      "PrivateCidrBlock2": 10.1.16.0/20
+      "PrivateCidrBlock3": 10.1.32.0/20
+      "AvailabilityZoneId1": use1-az1
+      "AvailabilityZoneId2": use1-az4
+      "AvailabilityZoneId3": use1-az6
+    us-west-2:
+      "VPCCidrBlock": 10.2.0.0/16
+      "PrivateCidrBlock1": 10.2.0.0/20
+      "PrivateCidrBlock2": 10.2.16.0/20
+      "PrivateCidrBlock3": 10.2.32.0/20
+      "AvailabilityZoneId1": usw2-az1
+      "AvailabilityZoneId2": usw2-az2
+      "AvailabilityZoneId3": usw2-az3
+
+########################################################################
+
+Conditions:
+  isPrimary: !Equals
+    - !Ref AWS::Region
+    - us-east-1
+
+########################################################################
+
+Resources:
+  ###########
+  # VPC
+  ###########
+
+  #VPC
+  MultiRegionBatchVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc.html
+      CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", "VPCCidrBlock"]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - !Ref NamingPrefix
+              - "VPC"
+  FlowLogRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - vpc-flow-logs.amazonaws.com
+        Version: "2012-10-17"
+      Path: /
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:DescribeLogGroups"
+                  - "logs:DescribeLogStreams"
+                Resource: !Sub 'arn:aws:logs:*:${AWS::AccountId}:*'
+            Version: "2012-10-17"
+          PolicyName: flowlogspolicy
+    Type: "AWS::IAM::Role"
+  VpcFlowLogs:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+      LogGroupName: MultiRegionBatchVPCFlowLogs
+      ResourceId: !Ref MultiRegionBatchVPC
+      ResourceType: VPC
+      TrafficType: ALL
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
+    Properties:
+      VpcId: !Ref MultiRegionBatchVPC
+      AvailabilityZoneId: !FindInMap [RegionMap, !Ref "AWS::Region", AvailabilityZoneId1]
+      CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", PrivateCidrBlock1]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - !Ref NamingPrefix
+              - Private
+
+  PrivateRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
+    Properties:
+      VpcId: !Ref MultiRegionBatchVPC
+      AvailabilityZoneId: !FindInMap [RegionMap, !Ref "AWS::Region", AvailabilityZoneId2]
+      CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", PrivateCidrBlock2]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - !Ref NamingPrefix
+              - Private
+
+  PrivateRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
+    Properties:
+      VpcId: !Ref MultiRegionBatchVPC
+      AvailabilityZoneId: !FindInMap [RegionMap, !Ref "AWS::Region", AvailabilityZoneId3]
+      CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", PrivateCidrBlock3]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - !Ref NamingPrefix
+              - Private
+
+  PrivateRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet3
+
+  PrivateRouteTable:
+    Type:  AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MultiRegionBatchVPC
+
+  VPCEndpointFoS3:            
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      RouteTableIds: 
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      VpcId: !Ref MultiRegionBatchVPC
+
+  VPCEndpointForDynamoDB:            
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      RouteTableIds: 
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
+      VpcEndpointType: Gateway
+      VpcId: !Ref MultiRegionBatchVPC
+
+  VPCEndpointForStepFunctions:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.states'
+      VpcEndpointType: Interface
+      VpcId: !Ref MultiRegionBatchVPC
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+
+  VPCEndpointForSMTP:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.email-smtp'
+      VpcEndpointType: Interface
+      VpcId: !Ref MultiRegionBatchVPC
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+
+  VPCEndpointForSecretsManager:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcEndpointType: Interface
+      VpcId: !Ref MultiRegionBatchVPC
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+
+  VPCEndpointForAPIGW:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.execute-api'
+      VpcEndpointType: Interface
+      VpcId: !Ref MultiRegionBatchVPC
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+
+#############
+# SSM Param to store API VPC EndpointId
+#############
+  APIGWVPCEndpointId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointForAPIGW${Env}
+      Value: !Ref VPCEndpointForAPIGW
+
+############
+# Secret to store the VpcId of the created VPC so that the R53 Hosted Zone can be associated with it 
+############
+  VpcId:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub VpcId-${AWS::Region}${Env}
+      Description: "VPC Id"
+      KmsKeyId: "alias/aws/secretsmanager"
+      SecretString: !Ref MultiRegionBatchVPC
+      ReplicaRegions:
+        - Region: !If [isPrimary, us-west-2, us-east-1]
+  
+############
+# Store subnet values in Parameter Store
+############
+  Subnet1:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Type: String
+      Name: !Sub Subnet1${Env}
+      Value: !Ref PrivateSubnet1
+  Subnet2:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Type: String
+      Name: !Sub Subnet2${Env}
+      Value: !Ref PrivateSubnet2
+  Subnet3:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Type: String
+      Name: !Sub Subnet3${Env}
+      Value: !Ref PrivateSubnet3
+
+###################################
+# Security Group
+###################################
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref MultiRegionBatchVPC
+      GroupDescription: "Security Group for Multi Region Batch resources"
+      SecurityGroupIngress:
+        - FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+          CidrIp: !GetAtt MultiRegionBatchVPC.CidrBlock
+          Description: "Allows inbound traffic for HTTPS"
+        - FromPort: 25
+          ToPort: 25
+          IpProtocol: tcp
+          CidrIp: !GetAtt MultiRegionBatchVPC.CidrBlock
+          Description: "Allows inbound traffic for SMTP"
+
+################
+# Buckets
+################
+
+  PrivateSecurityGroup:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub PrivateSG${Env}
+      Value: !Ref LambdaSecurityGroup
+
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+      VersioningConfiguration:
+        Status: Enabled
+
+  SourceBucketSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub SourceBucket-${AWS::Region}${Env}
+      Description: "Source Bucket ARN"
+      KmsKeyId: "alias/aws/secretsmanager"
+      SecretString: !Sub '{"SourceBucket":"${SourceBucket}","SourceBucketArn":"${SourceBucket.Arn}"}'
+      ReplicaRegions:
+        - Region: !If [isPrimary, !Ref SecondaryRegion, !Ref PrimaryRegion]
+
+  LoggingBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+
+  LoggingBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref LoggingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'AllowLogDelivery'
+            Action: 's3:PutObject'
+            Effect: 'Allow'
+            Resource:
+              - !Sub '${LoggingBucket.Arn}'
+              - !Sub '${LoggingBucket.Arn}/*'
+            Principal:
+              Service: "logging.s3.amazonaws.com"
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub '${SourceBucket.Arn}'
+              StringEquals:
+                'aws:SourceAccount': !Sub '${AWS::AccountId}'
+
+
+########################################################################
+Outputs:
+  MultiRegionBatchVPCId:
+    Value: !Ref MultiRegionBatchVPC
+  SourceBucket:
+    Value: !Ref SourceBucket
+  LogingBucket:
+    Value: !Ref LoggingBucket
+########################################################################

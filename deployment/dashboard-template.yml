@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: '(SO9169) Cloudwatch Dashboard Stack'
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  SecondaryRegion:
+    Type: String
+    Description: Enter the Secondary Region
+    Default: "us-west-2"
+
+Resources:
+  MultiRegionBatchDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub MultiRegionBatchDashboard${Env}
+      DashboardBody: !Sub '{
+    "widgets": [
+        {
+            "height": 6,
+            "width": 6,
+            "y": 0,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                    [ "MultiRegionBatch${Env}", "InputFilesSplit", "service", "SplitInputFileFunction${Env}" ]
+                ],
+                "region": "${PrimaryRegion}",
+                "title": "${PrimaryRegion} - Number of Input Files Split for Processing",
+                "period": 1,
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 0,
+            "x": 6,
+            "type": "metric",
+            "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                    [ "MultiRegionBatch${Env}", "EmailSent", "service", "SendEmailFunction${Env}" ]
+                ],
+                "region": "${PrimaryRegion}",
+                "title": "${PrimaryRegion} - Number of Processed Files",
+                "period": 1,
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 0,
+            "x": 12,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "AWS/States", "ExecutionsSucceeded", "StateMachineArn", "arn:aws:states:${PrimaryRegion}:${AWS::AccountId}:stateMachine:BlogBatchMainOrchestrator${Env}" ],
+                    [ ".", "ExecutionsFailed", ".", "." ],
+                    [ ".", "ExecutionsStarted", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${PrimaryRegion}",
+                "period": 1,
+                "stat": "Sum",
+                "title": "${PrimaryRegion} - Main Orchestrator Step Function Metrics"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 0,
+            "x": 18,
+            "type": "metric",
+            "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                    [ "AWS/States", "ExecutionsSucceeded", "StateMachineArn", "arn:aws:states:${PrimaryRegion}:${AWS::AccountId}:stateMachine:BlogBatchProcessChunk${Env}" ],
+                    [ ".", "ExecutionsFailed", ".", "." ],
+                    [ ".", "ExecutionsStarted", ".", "." ]
+                ],
+                "region": "${PrimaryRegion}",
+                "title": "${PrimaryRegion} - Chunk File Processor Step Function Metrics",
+                "period": 1,
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 6,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                    [ "MultiRegionBatch${Env}", "InputFilesSplit", "service", "SplitInputFileFunction${Env}" ]
+                ],
+                "region": "${SecondaryRegion}",
+                "title": "${SecondaryRegion} - Number of Input Files Split for Processing",
+                "period": 1,
+                "stat": "Sum"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 6,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                    [ "MultiRegionBatch${Env}", "EmailSent", "service", "SendEmailFunction${Env}" ]
+                ],
+                "region": "${SecondaryRegion}",
+                "title": "${SecondaryRegion} - Number of Processed Files",
+                "period": 1,
+                "stat": "Sum"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 6,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                    [ "AWS/States", "ExecutionsStarted", "StateMachineArn", "arn:aws:states:${SecondaryRegion}:${AWS::AccountId}:stateMachine:BlogBatchMainOrchestrator${Env}" ],
+                    [ ".", "ExecutionsSucceeded", ".", "." ],
+                    [ ".", "ExecutionsFailed", ".", "." ]
+                ],
+                "region": "${SecondaryRegion}",
+                "title": "${SecondaryRegion} - Main Orchestrator Step Function Metrics",
+                "period": 1,
+                "stat": "Sum"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 18,
+            "y": 6,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                    [ "AWS/States", "ExecutionsSucceeded", "StateMachineArn", "arn:aws:states:${SecondaryRegion}:${AWS::AccountId}:stateMachine:BlogBatchProcessChunk${Env}" ],
+                    [ ".", "ExecutionsStarted", ".", "." ],
+                    [ ".", "ExecutionsFailed", ".", "." ]
+                ],
+                "region": "${SecondaryRegion}",
+                "title": "${SecondaryRegion} - Chunk File Processor Step Function Metrics",
+                "period": 1,
+                "stat": "Sum"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 12,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                    [ "MultiRegionBatch${Env}", "ReconciledFiles", "service", "AutomationReconciliationFunction${Env}" ]
+                ],
+                "region": "${SecondaryRegion}",
+                "title": "${SecondaryRegion} - Number of files reconciled",
+                "period": 1,
+                "stat": "Sum"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 12,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                    [ "MultiRegionBatch${Env}", "ReconciledFiles", "service", "AutomationReconciliationFunction${Env}" ]
+                ],
+                "region": "${PrimaryRegion}",
+                "title": "${PrimaryRegion} - Number of files reconciled",
+                "period": 1,
+                "stat": "Sum"
+            }
+        }
+    ]
+}'

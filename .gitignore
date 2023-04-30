@@ -1,0 +1,6 @@
+.idea/*
+.idea
+.DS_Store
+.aws-sam
+test/*
+/deployment/cfn_nag_scan_results.txt

@@ -1,0 +1,350 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: '(SO9169) Global Resources Stack'
+Transform:
+  - AWS::LanguageExtensions
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  SecondaryRegion:
+    Type: String
+    Description: Enter the Secondary Region
+    Default: "us-west-2"
+
+Resources:
+  ##### Application Recovery Controller#######
+  ArcCluster:
+    Type: AWS::Route53RecoveryControl::Cluster
+    Properties:
+      Name: !Sub BatchFailoverArcCluster${Env}
+  ArcControlPanel:
+    Type: AWS::Route53RecoveryControl::ControlPanel
+    Properties:
+      ClusterArn: !GetAtt ArcCluster.ClusterArn
+      Name: !Sub BatchFailoverArcControlPanel${Env}
+  ArcRoutingControl:
+    Type: AWS::Route53RecoveryControl::RoutingControl
+    Properties:
+      ClusterArn: !GetAtt ArcCluster.ClusterArn
+      ControlPanelArn: !GetAtt ArcControlPanel.ControlPanelArn
+      Name: !Sub BatchFailoverArcRoutingControl${Env}
+  ArcHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: RECOVERY_CONTROL
+        RoutingControlArn: !GetAtt ArcRoutingControl.RoutingControlArn
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub BatchFailoverArcHealthCheck${Env}
+  ArcClusterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ArcClusterSecret${Env}
+      Description: "ARC Cluster ARN"
+      KmsKeyId: "alias/aws/secretsmanager"
+      SecretString: !Ref ArcCluster
+      ReplicaRegions:
+        - Region: !Ref SecondaryRegion
+  ArcRoutingControlSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ArcRoutingControlSecret${Env}
+      Description: "ARC Routing Control ARN"
+      KmsKeyId: "alias/aws/secretsmanager"
+      SecretString: !Ref ArcRoutingControl
+      ReplicaRegions:
+        - Region: !Ref SecondaryRegion
+  ArcHealthCheckId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub ArcHealthCheckId${Env}
+      Value: !Ref ArcHealthCheck
+  LambdaExecutionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Action:
+              - "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: "2012-10-17"
+      Path: /
+      Policies:
+        -
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub 'arn:aws:logs:*:${AWS::AccountId}:*'
+              - Effect: Allow
+                Action:
+                  - "route53-recovery-cluster:GetRoutingControlState"
+                  - "route53-recovery-cluster:ListRoutingControls"
+                  - "route53-recovery-cluster:UpdateRoutingControlState"
+                  - "route53-recovery-cluster:UpdateRoutingControlStates"
+                  - "route53-recovery-control-config:DescribeCluster"
+                  - "route53-recovery-control-config:DescribeControlPanel"
+                  - "route53-recovery-control-config:DescribeRoutingControl"
+                  - "route53-recovery-control-config:UpdateControlPanel"
+                  - "route53-recovery-control-config:UpdateRoutingControl"
+                Resource:
+                  - !Sub 'arn:aws:route53-recovery-control::${AWS::AccountId}:cluster/*'
+                  - !Sub 'arn:aws:route53-recovery-control::${AWS::AccountId}:controlpanel/*'
+              - Effect: Allow
+                Action:
+                  - "secretsmanager:GetSecretValue"
+                  - "secretsmanager:PutSecretValue"
+                  - "secretsmanager:CreateSecret"
+                  - "secretsmanager:UpdateSecret"
+                  - "secretsmanager:DeleteSecret"
+                  - "secretsmanager:RemoveRegionsFromReplication"
+                  - "secretsmanager:ReplicateSecretToRegions"
+                  - "secretsmanager:ListSecrets"
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
+            Version: "2012-10-17"
+          PolicyName: root
+    Type: "AWS::IAM::Role"
+  CustomBackedLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ArcClusterManagementFunction${Env}
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 90
+      Environment:
+        Variables:
+          ARC_CLUSTER_ARN: !Ref ArcCluster
+          ARC_ROUTING_CONTROL_ARN: !Ref ArcRoutingControl
+          ARC_CLUSTER_ENDPOINTS_SECRET: !Sub ArcClusterEndpoints${Env}
+          REPLICA_REGION: !Ref SecondaryRegion
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import logging
+          import boto3
+          import os
+          import json
+          # Init of the logging module
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+          
+          
+          def lambda_handler(event, context):
+              print(event)
+              responseData = {}
+              try:
+                client = boto3.client('route53-recovery-control-config', region_name='us-west-2')
+                cluster = client.describe_cluster(ClusterArn=os.environ['ARC_CLUSTER_ARN'])
+                endpoints = cluster['Cluster']['ClusterEndpoints']
+                regions = ["us-east-1", "us-west-2", "eu-west-1", "ap-northeast-1", "ap-southeast-2"]
+                sorted_endpoints = {}
+                for region in regions:
+                    for endpoint in endpoints:
+                        if endpoint["Region"] == region:
+                            sorted_endpoints[region] = endpoint["Endpoint"]
+                responseData['cluster_endpoints'] = json.dumps(sorted_endpoints)
+                client = boto3.client('secretsmanager', region_name=os.environ['AWS_REGION'])
+                try:
+                  if (event['RequestType'] == 'Update'):
+                    client.describe_secret(SecretId=os.environ['ARC_CLUSTER_ENDPOINTS_SECRET'])
+                    responseData['put_secret_value_response'] = client.put_secret_value(
+                        SecretId=os.environ['ARC_CLUSTER_ENDPOINTS_SECRET'],
+                        SecretString=json.dumps(sorted_endpoints),
+                    )
+                    logging.info('Cluster Endpoints secret updated')
+                  elif (event['RequestType'] == 'Create'):
+                    responseData['create_secret_response'] = client.create_secret(
+                      Description='ARC Cluster Endpoints',
+                      Name=os.environ['ARC_CLUSTER_ENDPOINTS_SECRET'],
+                      SecretString=json.dumps(sorted_endpoints),
+                      AddReplicaRegions=[{'Region': os.environ['REPLICA_REGION']}]
+                    )
+                    logging.info('Cluster Endpoints secret created')
+                  elif (event['RequestType'] == 'Delete'):
+                    responseData['remove_replica_region_response'] = client.remove_regions_from_replication(
+                      SecretId=os.environ['ARC_CLUSTER_ENDPOINTS_SECRET'],
+                      RemoveReplicaRegions=[
+                          os.environ['REPLICA_REGION'],
+                      ]
+                    )
+                    responseData['delete_secret_response'] = client.delete_secret(
+                      SecretId=os.environ['ARC_CLUSTER_ENDPOINTS_SECRET'],
+                      ForceDeleteWithoutRecovery=True
+                    )
+                    logging.info('Cluster Endpoints secret deleted')
+                  else:
+                    logging.error('Unsupported Stack Operation')
+                except Exception as err:
+                  logging.error(err)
+                  responseData['secret_operation_response'] = 'Failed'
+                updated_routing_control_state = "NotUpdated"
+                done = False
+                for region in regions:
+                    for endpoint in endpoints:
+                        if endpoint["Region"] == region:
+            
+                            try:
+                                logging.info("route 53 recovery cluster endpoint: " + endpoint["Endpoint"])
+                                client = boto3.client('route53-recovery-cluster', region_name=region, endpoint_url=endpoint["Endpoint"])
+            
+                                logging.info("toggling routing control")
+                                routing_control_state = client.get_routing_control_state(RoutingControlArn=os.environ['ARC_ROUTING_CONTROL_ARN'])
+                                logging.info("Current Routing Control State: " + routing_control_state["RoutingControlState"])
+                                if routing_control_state["RoutingControlState"] == "On":
+                                    logging.info("Routing Control State is ON")
+                                    done = True
+                                    break
+                                else:
+                                    client.update_routing_control_state(RoutingControlArn=os.environ['ARC_ROUTING_CONTROL_ARN'], RoutingControlState="On")
+                                    routing_control_state = client.get_routing_control_state(RoutingControlArn=os.environ['ARC_ROUTING_CONTROL_ARN'])
+                                    updated_routing_control_state = routing_control_state["RoutingControlState"]
+                                    logging.info("Updated routing Control State is " + updated_routing_control_state)
+                                    done = True
+                                    break
+                            except Exception as e:
+                                logging.error(e)
+                    if done:
+                        break
+                responseData['routing_control_state'] = updated_routing_control_state
+                responseData['message'] = 'Success'
+                logging.info('Sending %s to cloudformation', responseData['message'])
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+              except Exception as err:
+                responseData['message'] = 'Failed'
+                logging.error(err)
+                logging.info('Sending %s to cloudformation', responseData['message'])
+                cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+      Description: Function to setup ARC Cluster endpoint secrets and rotate arc controls
+
+  InvokeCustomLambda:
+    DependsOn: CustomBackedLambda
+    Type: Custom::InvokeCustomLambda
+    Properties:
+      ServiceToken: !GetAtt CustomBackedLambda.Arn
+  ##### DynamoDB Global Table for Batch State #######
+  BatchStateTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "fileName"
+          AttributeType: "S"
+        - AttributeName: "status"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "fileName"
+          KeyType: "HASH"
+      Replicas:
+        - Region: !Ref PrimaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+        - Region: !Ref SecondaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      SSESpecification:
+        SSEEnabled: true
+      GlobalSecondaryIndexes:
+      - IndexName: status-index
+        KeySchema:
+        - AttributeName: status
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+  BatchStateTableSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub BatchStateTableNameSecret${Env}
+      Description: "DDB Batch State Table"
+      KmsKeyId: "alias/aws/secretsmanager"
+      SecretString: !Ref BatchStateTable
+      ReplicaRegions:
+        - Region: !Ref SecondaryRegion
+  ##### SMTP Credentials for SES Service #######
+  SmtpIamUserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSESFullAccess"
+      Path: '/'
+  SmtpIamUser:
+    Type: AWS::IAM::User
+    Properties:
+      Path: '/'
+  SmtpAddUserToGroup:
+    Type: AWS::IAM::UserToGroupAddition
+    Properties:
+      GroupName: !Ref SmtpIamUserGroup
+      Users:
+        - !Ref SmtpIamUser
+  SmtpIamUserCredentials:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref SmtpIamUser
+
+  SmtpUserCredentials:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub SmtpCredentialsSecret${Env}
+      Description: "SMTP User Access Keys"
+      KmsKeyId: "alias/aws/secretsmanager"
+      ReplicaRegions:
+        - Region: !Ref SecondaryRegion
+      SecretString:
+        Fn::ToJsonString:
+          AccessKey: !Ref SmtpIamUserCredentials
+          SecretAccessKey: !GetAtt SmtpIamUserCredentials.SecretAccessKey
+  ##### Regional Failover Automation Role #######
+  AutomationServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ssm.amazonaws.com
+          Action: sts:AssumeRole
+          Condition:
+            StringEquals:
+              aws:SourceAccount: !Sub ${AWS::AccountId}
+            ArnLike:
+              aws:SourceArn: !Sub arn:aws:ssm:*:${AWS::AccountId}:automation-execution/*
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole
+      Path: "/"
+      RoleName: !Sub AutomationServiceRole${Env}
+Outputs:
+  BatchStateTable:
+    Description: "Batch State Table"
+    Value: !Ref BatchStateTable
+  BatchStateTableSecret:
+    Description: "Replicated AWS Secret storing the Batch State DynamoDB Global Table's name"
+    Value: !Ref BatchStateTableSecret
+  ArcHealthCheck:
+    Description: "Route53 Health Check to associate with TXT record in HostedZone stack"
+    Value: !Ref ArcHealthCheck
+  ArcRoutingControl:
+    Description: "ARC Routing Control"
+    Value: !Ref ArcRoutingControl
+  ArcControlPanel:
+    Description: "ARC Control Panel"
+    Value: !Ref ArcControlPanel
+  SmtpCredentialsSecret:
+    Description: "SMTP User Credentials"
+    Value: !Ref SmtpUserCredentials

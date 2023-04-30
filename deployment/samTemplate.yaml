@@ -1,0 +1,816 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 
+  - AWS::Serverless-2016-10-31
+  - AWS::LanguageExtensions
+Description: >
+  (SO9169) SAM Template for AWS Step Functions batch processing
+
+Globals:
+  Function:
+    Timeout: 900
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  SESSender:
+    Type: String
+    Default: "sender@example.com"
+    Description: Specify the sender email address.
+  SESRecipient:
+    Type: String
+    Default: "recipient@example.com"
+    Description: Specify the recipient email address.
+  SESIdentityName:
+    Type: String
+    Default: "sender@example.com"
+    Description: An email address or domain that Amazon SES users use to send email. It is a best practice to authorize only specific email addresses such as in this case sender@example.com to send emails. If your SES Accounts are in sandbox you have to specify both the sender and recipient emails, in that case modify the template.yaml to add the permissions for recipient email address.
+  InputArchiveFolder:
+    Type: String
+    Default: "input_archive"
+    Description: Amazon S3 prefix in the SourceBucket where the input file will be archived after processing.
+  FileChunkSize:
+    Type: String
+    Default: 600
+    Description: Size of each of the chunks, which is split from the input file.
+  FileDelimiter:
+    Type: String
+    Default: ","
+    Description: Delimiter of the CSV file (for example, a comma).
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  SourceBucket:
+    Type: String
+    Description:  The name of the in-region S3 bucket where file to be processed are uploaded
+  PowerToolsLambdaLayerAccountId:
+    Type: String
+    Description: The AWS AccountId where the PowerTools Python Lambda Layer is hosted
+    Default: 017000801446
+
+Conditions:
+  isPrimaryRegion: !Equals
+    - !Ref "AWS::Region"
+    - !Ref PrimaryRegion
+
+Resources:
+  SESIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref SESSender
+
+  BlogBatchProcessChunk:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub BlogBatchProcessChunk${Env}
+      Tracing:
+        Enabled: true
+      DefinitionUri: ../source/statemachine/blog-sfn-process-chunk.json
+      DefinitionSubstitutions:
+        ReadFileFunctionArn: !GetAtt ReadFileFunction.Arn
+        WriteOutputChunkFunctionArn: !GetAtt WriteOutputChunkFunction.Arn
+        ValidateDataFunctionArn: !GetAtt ValidateDataFunction.Arn
+        ApiEndpoint: !Sub "${Api}.execute-api.${AWS::Region}.amazonaws.com"
+        ErrorTableName: !Ref ErrorTable
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref GetDataFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ReadFileFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref WriteOutputChunkFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ValidateDataFunction
+        - DynamoDBWritePolicy:
+            TableName: !Ref ErrorTable
+        - Statement:
+            - Sid: AllowApiGatewayInvoke
+              Effect: Allow
+              Action:
+                - execute-api:Invoke
+              Resource: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/GET/financials/*"
+
+  BlogBatchMainOrchestrator:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub BlogBatchMainOrchestrator${Env}
+      Tracing:
+        Enabled: true
+      DefinitionUri: ../source/statemachine/blog-sfn-main-orchestrator.json
+      DefinitionSubstitutions:
+        SplitInputFileFunctionArn: !GetAtt SplitInputFileFunction.Arn
+        MergeS3FilesFunctionArn: !GetAtt MergeS3FilesFunction.Arn
+        SendEmailFunctionArn: !GetAtt SendEmailFunction.Arn
+        SNSArn: !Ref SNSTopic
+        SESSender: !Ref SESSender
+        SESRecipient: !Ref SESRecipient
+        BlogBatchProcessChunkArn: !GetAtt BlogBatchProcessChunk.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SplitInputFileFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref MergeS3FilesFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SendEmailFunction
+        - SNSCrudPolicy:
+            TopicName: !GetAtt SNSTopic.TopicName
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt BlogBatchProcessChunk.Name
+        - Statement:
+            - Sid: AllowPutTargets
+              Effect: Allow
+              Action:
+                - events:PutTargets
+                - events:PutRule
+                - events:DescribeRule
+              Resource: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule"
+            - Sid: AllowStatesDescribeStop
+              Effect: Allow
+              Action:
+                 - states:DescribeExecution
+                 - states:StopExecution
+              Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:${BlogBatchProcessChunk.Name}:*"
+
+  SplitInputFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      CodeUri: ../source/split-ip-file/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Tracing: Active
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub '{{resolve:secretsmanager:SourceBucket-${AWS::Region}${Env}:SecretString:SourceBucket}}'
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: !Sub 'SplitInputFileFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+
+  SplitInputFileFunctionLogGroup:
+    DependsOn: SplitInputFileFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${SplitInputFileFunction}
+      RetentionInDays: 7
+
+  AutomationReconciliationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub AutomationReconciliationFunction${Env}
+      CodeUri: ../source/reconciliation/
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Sub '{{resolve:secretsmanager:BatchStateTableNameSecret${Env}}}'
+        - S3CrudPolicy:
+            BucketName: !Ref SourceBucket
+      Environment:
+        Variables:
+          BATCH_STATE_DDB: !Sub '{{resolve:secretsmanager:BatchStateTableNameSecret${Env}}}'
+          SECONDARY_REGION_BUCKET: !Sub '{{resolve:secretsmanager:SourceBucket-${AWS::Region}${Env}:SecretString:SourceBucket}}'
+          POWERTOOLS_SERVICE_NAME: !Sub 'AutomationReconciliationFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+
+
+  AutomationReconciliationFunctionLogGroup:
+    DependsOn: AutomationReconciliationFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${AutomationReconciliationFunction}
+      RetentionInDays: 7
+
+  MergeS3FilesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/merge-s3-files/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Sub '{{resolve:secretsmanager:SourceBucket-${AWS::Region}${Env}:SecretString:SourceBucket}}'
+        - S3WritePolicy:
+            BucketName: !Sub '{{resolve:secretsmanager:SourceBucket-${AWS::Region}${Env}:SecretString:SourceBucket}}'
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: !Sub 'MergeS3FilesFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+
+
+  MergeS3FilesFunctionLogGroup:
+    DependsOn: MergeS3FilesFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${MergeS3FilesFunction}
+      RetentionInDays: 7
+
+  SendEmailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/send-email/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+      Policies:
+        - SESCrudPolicy:
+            IdentityName: !Ref SESIdentityName
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+              - "s3:GetObject"
+              - "s3:ListBucket"
+              - "s3:GetBucketLocation"
+              - "s3:GetObjectVersion"
+              - "s3:GetLifecycleConfiguration"
+              Resource: "arn:aws:s3:::*"
+              Condition:
+                StringEquals:
+                  "s3:ResourceAccount": !Sub "${AWS::AccountId}"
+        - DynamoDBWritePolicy:
+            TableName: !Sub '{{resolve:secretsmanager:BatchStateTableNameSecret${Env}}}'
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+              - "s3:GetObject"
+              - "s3:ListBucket"
+              - "s3:GetBucketLocation"
+              - "s3:GetObjectVersion"
+              - "s3:GetLifecycleConfiguration"
+              Resource:
+              - !Join
+                - ''
+                - - !Sub "arn:${AWS::Partition}:s3::${AWS::AccountId}:accesspoint/"
+                  - !Sub '{{resolve:secretsmanager:SourceBucketMRAPSecret${Env}}}'
+              - !Join
+                - ''
+                - - !Sub "arn:${AWS::Partition}:s3::${AWS::AccountId}:accesspoint/"
+                  - !Sub '{{resolve:secretsmanager:SourceBucketMRAPSecret${Env}}}'
+                  - "/*"
+      Environment:
+        Variables:
+          BATCH_STATE_DDB: !Sub '{{resolve:secretsmanager:BatchStateTableNameSecret${Env}}}'
+          SMTP_CREDENTIAL_SECRET: !Sub SmtpCredentialsSecret${Env}
+          SMTP_HOST: !Sub 'email-smtp.${AWS::Region}.amazonaws.com'
+          MRAP_ALIAS_SECRET: !Sub SourceBucketMRAPSecret${Env}
+          POWERTOOLS_SERVICE_NAME: !Sub 'SendEmailFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+
+  SendEmailFunctionLogGroup:
+    DependsOn: SendEmailFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${SendEmailFunction}
+      RetentionInDays: 7
+
+  Api:
+    Type: AWS::Serverless::Api
+    DependsOn: ApiCWLRoleArn
+    Properties:
+      TracingEnabled: true
+      StageName: Prod
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          UsagePlanName: "batch-api-usage-plan"
+          Quota:
+            Limit: 100
+            Period: DAY
+          Throttle:
+            BurstLimit: 50
+            RateLimit: 100
+          Description: "Batch API Usage Plan"
+      AccessLogSetting:
+        DestinationArn: !Sub ${ApiAccessLogGroup.Arn}
+        Format: "{ 'requestId':'$context.requestId', 'ip': '$context.identity.sourceIp', 'caller':'$context.identity.caller', 'user':'$context.identity.user','requestTime':'$context.requestTime', 'xrayTraceId':'$context.xrayTraceId', 'wafResponseCode':'$context.wafResponseCode', 'httpMethod':'$context.httpMethod','resourcePath':'$context.resourcePath', 'status':'$context.status','protocol':'$context.protocol', 'responseLength':'$context.responseLength' }"
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: Api
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${Api}
+      RetentionInDays: 7
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+
+  LogGroupKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-loggroup
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - !Sub 'arn:${AWS::Partition}:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Enable Cloudwatch access
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: '*'
+
+
+  ApiCWLRoleArn:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt CloudWatchRole.Arn
+
+
+  CloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Action: 'sts:AssumeRole'
+          Effect: Allow
+          Principal:
+            Service: apigateway.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs'
+
+  GetDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/get-data/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref FinancialTable
+          POWERTOOLS_SERVICE_NAME: !Sub 'GetDataFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+      Policies:
+        - AWSLambdaExecute
+        - DynamoDBReadPolicy:
+            TableName: !Ref FinancialTable
+      Events:
+        GetData:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /financials/{uuid}
+            Method: get
+
+  GetDataFunctionLogGroup:
+    DependsOn: GetDataFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${GetDataFunction}
+      RetentionInDays: 7
+
+  ReadFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/read-file/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: !Sub 'ReadFileFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Sub '{{resolve:secretsmanager:SourceBucket-${AWS::Region}${Env}:SecretString:SourceBucket}}'
+
+
+  ReadFileFunctionLogGroup:
+    DependsOn: ReadFileFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${ReadFileFunction}
+      RetentionInDays: 7
+
+
+  FinancialTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: uuid
+          AttributeType: S
+      KeySchema:
+        - AttributeName: uuid
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  ErrorTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: uuid
+          AttributeType: S
+      KeySchema:
+          - AttributeName: uuid
+            KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  WriteOutputChunkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/write-output-chunk/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: !Sub 'WriteOutputChunkFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Sub '{{resolve:secretsmanager:SourceBucket-${AWS::Region}${Env}:SecretString:SourceBucket}}'
+
+
+  WriteOutputChunkFunctionLogGroup:
+    DependsOn: WriteOutputChunkFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${WriteOutputChunkFunction}
+      RetentionInDays: 7
+
+  ValidateDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/validate-data/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: !Sub 'ValidateDataFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+
+  ValidateDataFunctionLogGroup:
+    DependsOn: ValidateDataFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${ValidateDataFunction}
+      RetentionInDays: 7
+
+  AutomationRegionalFailoverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      FunctionName: !Sub AutomationRegionalFailoverFunction${Env}
+      CodeUri: ../source/failover/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - "route53-recovery-cluster:*"
+                - "route53-recovery-control-config:*"
+              Resource:
+                - !Sub 'arn:aws:route53-recovery-control::${AWS::AccountId}:cluster/*'
+                - !Sub 'arn:aws:route53-recovery-control::${AWS::AccountId}:controlpanel/*'
+                - !Sub 'arn:aws:route53-recovery-control::${AWS::AccountId}:controlpanel/*/routingcontrol/*'
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: !Sub 'AutomationRegionalFailoverFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+          ARC_ROUTING_CONTROL_ARN: !Sub '{{resolve:secretsmanager:ArcRoutingControlSecret${Env}}}'
+          ARC_CLUSTER_ENDPOINTS: !Sub '{{resolve:secretsmanager:ArcClusterEndpoints${Env}}}'
+
+  AutomationRegionalFailoverFunctionLogGroup:
+    DependsOn: AutomationRegionalFailoverFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${AutomationRegionalFailoverFunction}
+      RetentionInDays: 7
+
+  S3NotificationLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/s3-lambda-notification/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+      Policies:
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt BlogBatchMainOrchestrator.Name
+        - DynamoDBWritePolicy:
+            TableName: !Sub '{{resolve:secretsmanager:BatchStateTableNameSecret${Env}}}'
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
+      Environment:
+        Variables:
+          STATE_MACHINE_EXECUTION_NAME: "BlogBatchMainOrchestrator"
+          INPUT_ARCHIVE_FOLDER: !Ref InputArchiveFolder
+          FILE_CHUNK_SIZE: !Ref FileChunkSize
+          FILE_DELIMITER: !Ref FileDelimiter
+          STATE_MACHINE_ARN: !GetAtt BlogBatchMainOrchestrator.Arn
+          BATCH_STATE_DDB: !Sub '{{resolve:secretsmanager:BatchStateTableNameSecret${Env}}}'
+          DNS_RECORD_SECRET: !Sub DNSRecordSecret${Env}
+          POWERTOOLS_SERVICE_NAME: !Sub 'S3NotificationLambdaFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+
+  S3NotificationLambdaFunctionLogGroup:
+    DependsOn: S3NotificationLambdaFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${S3NotificationLambdaFunction}
+      RetentionInDays: 7
+
+  S3BucketEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:invokeFunction
+      SourceAccount: !Ref 'AWS::AccountId'
+      FunctionName: !Ref S3NotificationLambdaFunction
+      SourceArn: !Sub '{{resolve:secretsmanager:SourceBucket-${AWS::Region}${Env}:SecretString:SourceBucketArn}}'
+      Principal: s3.amazonaws.com
+
+  PostStackProcessingFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3BucketNotificationDynamoDBInsertPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowBucketNotification
+                Effect: Allow
+                Action: s3:PutBucketNotification
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::{{resolve:secretsmanager:SourceBucket-${AWS::Region}${Env}:SecretString:SourceBucket}}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::{{resolve:secretsmanager:SourceBucket-${AWS::Region}${Env}:SecretString:SourceBucket}}/*'
+              - Sid: DynamoDBInsert
+                Effect: Allow
+                Action: dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt FinancialTable.Arn
+        - PolicyName: EC2NetworkInterfacesPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowNetworkInterfacePermissions
+                Effect: Allow
+                Action:
+                  - "ec2:DescribeNetworkInterfaces"
+                  - "ec2:CreateNetworkInterface"
+                  - "ec2:DeleteNetworkInterface"
+                  - "ec2:DescribeInstances"
+                  - "ec2:AttachNetworkInterface"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:PrincipalAccount": !Sub "${AWS::AccountId}"
+
+  PostStackProcessingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      Description: Function to apply notification to the S3 bucket
+      CodeUri: ../source/custom-resource/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt PostStackProcessingFunctionRole.Arn
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: !Sub 'PostStackProcessingFunction${Env}'
+          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          LOG_LEVEL: INFO
+      VpcConfig:
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:PrivateSG${Env}}}'
+
+  PostStackProcessingFunctionLogGroup:
+    DependsOn: PostStackProcessingFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${PostStackProcessingFunction}
+      RetentionInDays: 7
+
+  PostStackProcessing:
+    Type: Custom::PostStackProcessing
+    Properties:
+      ServiceToken: !GetAtt PostStackProcessingFunction.Arn
+      S3Bucket: !Ref SourceBucket
+      FunctionARN: !GetAtt S3NotificationLambdaFunction.Arn
+      NotificationId: S3ObjectCreatedEvent
+      FinancialTableName: !Ref FinancialTable
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+
+  AutomationFailoverRunbook:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: 'AutomationFailoverRunbook'
+      DocumentType: Automation
+      DocumentFormat: YAML
+      Content:
+        description: |-
+          *Runbook for Batch Failover*
+
+          ---
+          # Runbook for Batch Failover
+
+          1. Get Current Routing Control State
+          2. Rotate Arc Controls
+          3. Wait for DNS Cache Refresh and S3 CRR
+          4. Trigger Reconciliation
+        schemaVersion: '0.3'
+        assumeRole: !Sub 'arn:aws:iam::${AWS::AccountId}:role/AutomationServiceRole${Env}'
+        mainSteps:
+          - name: GetRoutingControlState
+            action: 'aws:invokeLambdaFunction'
+            maxAttempts: 1
+            timeoutSeconds: 120
+            onFailure: Abort
+            inputs:
+              FunctionName: !Ref AutomationRegionalFailoverFunction
+              InputPayload:
+                FUNCTION: get_current_routing_control_state
+            outputs:
+              - Name: CURRENT_ROUTING_CONTROL_STATE
+                Selector: $.Payload.routing_control_state
+                Type: String
+          - name: RotateArcControls
+            action: 'aws:invokeLambdaFunction'
+            maxAttempts: 1
+            timeoutSeconds: 120
+            onFailure: Abort
+            inputs:
+              FunctionName: !Ref AutomationRegionalFailoverFunction
+              InputPayload:
+                FUNCTION: rotate_arc_controls
+                CURRENT_ROUTING_CONTROL_STATE: '{{GetRoutingControlState.CURRENT_ROUTING_CONTROL_STATE}}'
+            outputs:
+              - Name: UPDATED_ROUTING_CONTROL_STATE
+                Selector: $.Payload.routing_control_state
+                Type: String
+          - name: WaitForDNSCacheRefresh
+            action: aws:sleep
+            inputs:
+              Duration: PT15M
+          - name: TriggerReconciliation
+            action: 'aws:invokeLambdaFunction'
+            maxAttempts: 1
+            timeoutSeconds: 60
+            onFailure: Abort
+            inputs:
+              FunctionName: !Ref AutomationReconciliationFunction
+            outputs:
+              - Name: NUMBER_OF_FILES_SUBMITTED_FOR_RECONCILIATION
+                Selector: $.Payload.num_files_submitted_for_reconciliation
+                Type: Integer
+              - Name: FILE_NAMES_FOR_RECONCILIATION
+                Selector: $.Payload.file_list
+                Type: StringList

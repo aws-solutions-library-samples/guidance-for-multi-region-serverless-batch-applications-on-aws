@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: '(SO9169) This template will perform network distruption and creates DENY for various scopes of AWS structured boundaries/services. '
+Parameters:
+  FISExperimentSubnetTag:
+    Description: 'VPC Subnet that will be blocked for specific network or service traffic. It will use Network ACL(NACL) DENY rules to DENY. Please enter the value of the Name tag'
+    Type: String
+    Default: mr-batch-Private
+  PrefixListIdentifier:
+    Description: 'The identifier of the Managed Prefix List (either ARN, ID or Name) to block at the start of the experiment. This is ONLY required if prefix-list is the SCOPE '
+    Type: String
+    Default: ''
+  Scope:
+    Description: 'The source traffic to block (inbound and outbound )for the subnet. Possible options are: all, availability-zone, prefix-list, s3, dynamodb, vpc'
+    Type: String
+    Default: s3
+    AllowedValues:
+      - all
+      - availability-zone
+      - s3
+      - dynamodb
+      - vpc
+  ExperimentDuration:
+    Description: 'The time duration to execute the experiment. This is in the format of PT1M (1 minute )'
+    Type: String
+    Default: PT20M
+  ExperimentTemplateName:
+    Description: 'Name of the experiment template. This should be unique for each experiment'
+    Type: String
+    Default: MultiRegionBatchChaosTemplate
+
+Resources:
+  FISLogGroupKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-loggroup
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - !Sub 'arn:${AWS::Partition}:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Enable Cloudwatch access
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: '*'
+
+  FISExperimentLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      KmsKeyId: !GetAtt FISLogGroupKey.Arn
+      LogGroupName:
+        !Join
+        - ''
+        - - !Ref ExperimentTemplateName
+          - 'logs'
+      RetentionInDays: 7
+
+  FISBlockingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ fis.amazonaws.com ]
+            Action: [ "sts:AssumeRole" ]
+      Path: /
+      Policies:
+        - PolicyName: FISExperimentTemplate-BlockNetwork
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:DescribeLogGroups"
+                  - "logs:DescribeResourcePolicies"
+                  - "logs:PutResourcePolicy"
+                  - "logs:CreateLogDelivery"
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    "aws:PrincipalAccount": !Sub "${AWS::AccountId}"
+                    "aws:ResourceAccount": !Sub "${AWS::AccountId}"
+      MaxSessionDuration: 3600
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorNetworkAccess'
+
+  FISBlockNetwork:
+    Type: 'AWS::FIS::ExperimentTemplate'
+    Properties:
+      Description: 'This experiment is created to block various services within (DENY inbound and outbound) a Subnet'
+      Targets:
+        Subnets-deny:
+          ResourceType: 'aws:ec2:subnet'
+          ResourceTags:
+            Name: !Ref FISExperimentSubnetTag
+          SelectionMode: 'ALL'
+      Actions:
+        DenyNetwork:
+          ActionId: 'aws:network:disrupt-connectivity'
+          Parameters:
+            duration: !Ref ExperimentDuration
+            prefixListIdentifier: !Ref PrefixListIdentifier
+            scope: !Ref Scope
+          Targets:
+            Subnets: 'Subnets-deny'
+      StopConditions:
+        - Source: 'none'
+      LogConfiguration:
+        CloudWatchLogsConfiguration:
+          LogGroupArn: !GetAtt FISExperimentLogGroup.Arn
+        LogSchemaVersion: 1
+      RoleArn: !GetAtt FISBlockingRole.Arn
+      Tags:
+        Name: !Ref ExperimentTemplateName

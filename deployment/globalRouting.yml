@@ -1,0 +1,306 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: '(SO9169) Routing Controls'
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  SecondaryRegion:
+    Type: String
+    Description: Enter the Secondary Region
+    Default: "us-west-2"
+  MRAPName:
+    Type: String
+    Description: Enter the MRAP Name
+    Default: "source-bucket-mrap"
+  ReplicationRuleSetupCustomLambda:
+    Type: String
+    Description: Enter the MRAP Name
+    Default: "ReplicationRuleSetupCustomLambda"
+  PrimaryRegionBucketSecretName:
+    Type: String
+    Description: Enter the Secret that contains the source bucket details in the primary Region.
+    Default: "SourceBucket-us-east-1"
+  SecondaryRegionBucketSecretName:
+    Type: String
+    Description: Enter the Secret that contains the source bucket details in the secondary Region.
+    Default: "SourceBucket-us-west-2"
+  DomainName:
+    Type: String
+    Description: The name of the domain that you want created as a private hosted zone in Route53
+    Default: demo.io
+
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Sub ${DomainName}
+      VPCs:
+        - VPCId: !Sub '{{resolve:secretsmanager:VpcId-${PrimaryRegion}${Env}}}'
+          VPCRegion: !Ref PrimaryRegion
+        - VPCId: !Sub '{{resolve:secretsmanager:VpcId-${SecondaryRegion}${Env}}}'
+          VPCRegion: !Ref SecondaryRegion
+  PrimaryRegionRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub active.${DomainName}
+      Failover: PRIMARY
+      HealthCheckId: !Sub '{{resolve:ssm:ArcHealthCheckId${Env}}}'
+      Type: TXT
+      SetIdentifier: PrimaryRegion
+      TTL: 60
+      ResourceRecords:
+        - !Sub '"${PrimaryRegion}"'
+  SecondaryRegionRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub active.${DomainName}
+      Failover: SECONDARY
+      Type: TXT
+      SetIdentifier: SecondaryRegion
+      TTL: 60
+      ResourceRecords:
+        - !Sub '"${SecondaryRegion}"'
+  DNSRecordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub DNSRecordSecret${Env}
+      Description: "Route53 DNS"
+      KmsKeyId: "alias/aws/secretsmanager"
+      SecretString: !Ref PrimaryRegionRecord
+      ReplicaRegions:
+        - Region: !Ref SecondaryRegion
+  SourceBucketMRAP:
+    Type: AWS::S3::MultiRegionAccessPoint
+    Properties:
+      Name: !Sub ${MRAPName}${Env}
+      Regions:
+        - Bucket: !Sub '{{resolve:secretsmanager:${PrimaryRegionBucketSecretName}:SecretString:SourceBucket}}'
+        - Bucket: !Sub '{{resolve:secretsmanager:${SecondaryRegionBucketSecretName}:SecretString:SourceBucket}}'
+  SourceBucketMRAPSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub SourceBucketMRAPSecret${Env}
+      Description: "S3 MRAP Alias"
+      KmsKeyId: "alias/aws/secretsmanager"
+      SecretString: !GetAtt SourceBucketMRAP.Alias
+      ReplicaRegions:
+        - Region: !Ref SecondaryRegion
+  LambdaExecutionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: "2012-10-17"
+      Path: /
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Effect: Allow
+                Resource: "arn:aws:logs:*:*:*"
+              - Action:
+                  - "s3:PutReplicationConfiguration"
+                  - "s3:PutBucketVersioning"
+                Effect: Allow
+                Resource: "arn:aws:s3:::*"
+              - Action:
+                  - "iam:PassRole"
+                Effect: Allow
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
+            Version: "2012-10-17"
+          PolicyName: root
+    Type: "AWS::IAM::Role"
+  ReplicationRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - s3.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: ReplicationPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:GetObjectVersionForReplication"
+                  - "s3:GetObjectVersionAcl"
+                  - "s3:GetObjectVersionTagging"
+                  - "s3:ListBucket"
+                  - "s3:GetReplicationConfiguration"
+                  - "s3:ReplicateObject"
+                  - "s3:ReplicateDelete"
+                  - "s3:ReplicateTags"
+                Resource: "arn:aws:s3:::*"
+  CustomBackedLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ReplicationRuleSetupCustomLambda}${Env}
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 90
+      Environment:
+        Variables:
+          Bucket1Name: !Sub '{{resolve:secretsmanager:${PrimaryRegionBucketSecretName}:SecretString:SourceBucket}}'
+          Bucket1Arn: !Sub '{{resolve:secretsmanager:${PrimaryRegionBucketSecretName}:SecretString:SourceBucketArn}}'
+          Bucket2Name: !Sub '{{resolve:secretsmanager:${SecondaryRegionBucketSecretName}:SecretString:SourceBucket}}'
+          Bucket2Arn: !Sub '{{resolve:secretsmanager:${SecondaryRegionBucketSecretName}:SecretString:SourceBucketArn}}'
+          ReplicationRole: !GetAtt ReplicationRole.Arn
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import logging
+          import boto3
+          import os
+          # Init of the logging module
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+          
+          
+          def lambda_handler(event, context):
+              try:
+                s3 = boto3.client('s3')
+                logging.info(event['ResourceProperties'])
+                if event.get('RequestType') == 'Create':
+                    responseData = {}
+                    responseData['put_bucket_1_versioning_response'] = s3.put_bucket_versioning(
+                        Bucket=os.environ['Bucket1Name'],
+                        VersioningConfiguration={
+                            'MFADelete': 'Disabled',
+                            'Status': 'Enabled',
+                        }
+                    )
+                    responseData['put_bucket_1_replication_response'] = s3.put_bucket_replication(
+                        Bucket=os.environ['Bucket1Name'],
+                        ReplicationConfiguration={
+                            'Role': os.environ['ReplicationRole'],
+                            'Rules': [
+                                {
+                                    'Status': 'Enabled',
+                                    'Priority': 1,
+                                    'DeleteMarkerReplication': {
+                                        'Status': 'Enabled'
+                                    },
+                                    'Filter': {
+                                        'Prefix': ''
+                                    },
+                                    'Destination': {
+                                        'Bucket': os.environ['Bucket2Arn'],
+                                        'ReplicationTime': {
+                                          'Status': 'Enabled',
+                                          'Time': {
+                                              'Minutes': 15
+                                          }
+                                        },
+                                        'Metrics': {
+                                          'Status': 'Enabled',
+                                          'EventThreshold': {
+                                            'Minutes': 15
+                                          }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    )
+                    responseData['put_bucket_2_versioning_response'] = s3.put_bucket_versioning(
+                        Bucket=os.environ['Bucket2Name'],
+                        VersioningConfiguration={
+                            'MFADelete': 'Disabled',
+                            'Status': 'Enabled',
+                        }
+                    )
+                    responseData['put_bucket_2_replication_response'] = s3.put_bucket_replication(
+                        Bucket=os.environ['Bucket2Name'],
+                        ReplicationConfiguration={
+                            'Role': os.environ['ReplicationRole'],
+                            'Rules': [
+                                {
+                                    'Status': 'Enabled',
+                                    'Priority': 1,
+                                    'DeleteMarkerReplication': {
+                                        'Status': 'Enabled'
+                                    },
+                                    'Filter': {
+                                        'Prefix': ''
+                                    },
+                                    'Destination': {
+                                        'Bucket': os.environ['Bucket1Arn'],
+                                        'ReplicationTime': {
+                                          'Status': 'Enabled',
+                                          'Time': {
+                                              'Minutes': 15
+                                          }
+                                        },
+                                        'Metrics': {
+                                          'Status': 'Enabled',
+                                          'EventThreshold': {
+                                            'Minutes': 15
+                                          }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    )
+                    responseData['message'] = 'Success'
+                    logging.info('Sending %s to cloudformation', responseData['message'])
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                elif event.get('RequestType') == 'Delete':
+                    responseData = {}
+                    responseData['delete_bucket_1_repl_response'] = s3.delete_bucket_replication(
+                        Bucket=os.environ['Bucket1Name']
+                    )
+                    responseData['delete_bucket_2_repl_response'] = s3.delete_bucket_replication(
+                        Bucket=os.environ['Bucket2Name']
+                    )
+                    responseData['message'] = "Success"
+                    logging.info('Sending %s to cloudformation', responseData['message'])
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                else:
+                    logging.error('Unknown operation: %s', event.get('RequestType'))
+                    responseData = {}
+                    responseData['message'] = "Invalid operation"
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+              except Exception as err:
+                responseData = {}
+                responseData['message'] = 'Failed'
+                logging.error(err)
+                cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+      Description: FUnction to enable Cross Region replication between buckets
+
+  InvokeCustomLambda:
+    DependsOn: CustomBackedLambda
+    Type: Custom::InvokeCustomLambda
+    Properties:
+      ServiceToken: !GetAtt CustomBackedLambda.Arn
+Outputs:
+  SourceBucketMRAPEndpoint:
+    Description: "SourceBucketMRAP"
+    Value: !GetAtt SourceBucketMRAP.Alias
+  CustomLambdaOutput:
+    Description: Message from custom lambda
+    Value: !GetAtt InvokeCustomLambda.message

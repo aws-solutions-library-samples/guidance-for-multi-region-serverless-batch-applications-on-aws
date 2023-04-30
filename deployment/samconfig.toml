@@ -1,0 +1,5 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+parameter_overrides = "InputArchiveFolder=\"input_archive\" FileChunkSize=\"600\" FileDelimiter=\",\""
