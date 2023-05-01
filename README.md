@@ -98,8 +98,7 @@ Before starting deployment process please update the following variables in the 
 **ENV** - It is the unique variable that indicates the environment name. Global resources created, such as S3 buckets, use this name. (ex: -dev)
 
 **SES_IDENTITY** - The email id used to create a verified SES identity for sending emails. (ex: joejane@xyz.com). The solution creates a 
-new identity in the Amazon Simple Email Service which requires a verification before it can be used by the solution. You can also  
-provide an email address with the `+` symbol (for example; joejane+batch@xyz.com).
+new identity in the Amazon Simple Email Service which requires a verification before it can be used by the solution. You can also provide an email address with the `+` symbol (for example; joejane+batch@xyz.com).
 
 **PRIMARY_REGION** - The AWS region that will serve as primary for the workload
 
