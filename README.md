@@ -12,7 +12,7 @@ spans multiple Region, and DynamoDB Global Tables for persisting batch state and
 ## Architecture
 
 ### 1. Operating Batch in Primary Region
-![Application Running in Primary Region](assets/MRBlogs-Primary Region Sequence.png)
+![Application Running in Primary Region](assets/MRBlogs-Primary-Region-Sequence.png)
 1. A file is put to S3 bucket via Multi-region Access Point.  MRAP routes the file to one of the S3 buckets.  Each bucket will replicate the object to the other bucket.
 2. The lambda function is invoked via S3 putObject event in both regions.  
 3. The function will resolve the TXT record in the Route53 private hosted zone to determine if it is the active region.  If it is, execution will continue.  If it is not, the function will exit and no further actions will be taken.  The function in the active region writes metadata on the file to the DynamoDB Batch State table including that the processing has started and starts the first Step Function.
