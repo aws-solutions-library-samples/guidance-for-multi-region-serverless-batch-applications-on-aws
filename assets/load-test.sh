@@ -1,7 +1,7 @@
 #!/bin/bash
 #set -xv
 
-usage() { echo "Usage: $0 [-a <s3 mrap ARN>] [-r <number of batch file runs>] [-w <wait between uploads>]" 1>&2; exit 1; }
+usage() { echo "Usage: $0 [-a <s3 mrap ARN>] [-r <number of batch file runs>] [-w <wait in seconds between uploads>]" 1>&2; exit 1; }
 
 while getopts ":a:r:w:" opt; do
   case $opt in
