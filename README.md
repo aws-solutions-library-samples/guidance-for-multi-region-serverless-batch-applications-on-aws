@@ -146,7 +146,8 @@ The script is automated to upload 100 objects to the MRAP endpoint with a 1 seco
 
 Execute the shell script as follows. To make the shell script as an executable you can use the command `chmod +x load_test.sh`
 ```shell
-./load-test.sh $AWS_ACCOUNT $MRAP_ALIAS
+MRAP_ARN="arn:aws:s3::${AWS_ACCOUNT}:accesspoint/${MRAP_ALIAS}"
+./load-test.sh $MRAP_ARN
 ```
 
 ## Observability
