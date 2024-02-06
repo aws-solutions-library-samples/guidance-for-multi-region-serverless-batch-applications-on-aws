@@ -1,10 +1,11 @@
 #!/bin/sh
-
+#set -xv
 BUCKET=$1
+# test if an s3 bucket exists and delete all objects and delete markers from it
+# if it does not exist, just print a message
+bucketExists=`aws s3api list-buckets --query "Buckets[].Name" | grep -w "$BUCKET" | wc -l`
 
-bucketExists=$(aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null && echo "yes" || echo "no")
-echo "BucketExists: $bucketExists"
-if [ "$bucketExists" = "yes" ]
+if [ "$bucketExists" -eq 1 ]
 then
   objects=$(aws s3api list-object-versions --bucket "$BUCKET" --no-paginate --output=json --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}')
   count=$(awk '/"Objects": null/ {print}' <<< "$objects" | wc -l)
