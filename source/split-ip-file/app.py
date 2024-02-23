@@ -40,7 +40,11 @@ def lambda_handler(event, context):
     # Number of files to be created
     num_files = file_count(s3.open(input_file, 'r'), file_delimiter, file_row_limit)
     # Split the input file into several files, each with the number of records mentioned in the fileChunkSize parameter.
-    splitFileNames = split(s3.open(input_file, 'r'), file_delimiter, file_row_limit, output_file_template,
+    splitFileNames = split(input_file,
+                           s3.open(input_file, 'r'),
+                           file_delimiter,
+                           file_row_limit,
+                           output_file_template,
                            output_path, True,
                            num_files)
     # Archive the input file.
@@ -65,11 +69,11 @@ def file_count(file_handler, delimiter, row_limit):
 
 
 # Split the input into several smaller files.
-def split(filehandler, delimiter, row_limit, output_name_template, output_path, keep_headers, num_files):
+def split(input_file, filehandler, delimiter, row_limit, output_name_template, output_path, keep_headers, num_files):
     import csv
     reader = csv.reader(filehandler, delimiter=delimiter)
     split_file_path = []
-
+    data = []
     current_piece = 1
     current_out_path = os.path.join(
         output_path,
@@ -94,6 +98,8 @@ def split(filehandler, delimiter, row_limit, output_name_template, output_path, 
             if keep_headers:
                 current_out_writer.writerow(headers)
         current_out_writer.writerow(row)
+        data.append(row[0])
+    logger.info("Data", input_file=input_file, data=data)
     return split_file_path
 
 

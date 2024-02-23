@@ -14,7 +14,7 @@ def lambda_handler(event, context):
     bucket = event['bucket']
     key = event['key']
     to_process_folder = event['toProcessFolder']
-
+    data = []
     output_path = to_process_folder.replace("to_process", "output")
 
     output = []
@@ -63,6 +63,15 @@ def lambda_handler(event, context):
                                         Key=s3_target_key,
                                         Body=output_body)
 
+        line_num = 0
+        lines = output_body.splitlines();
+        for line in lines:
+            words = line.split(",")
+            if line_num > 0:
+                data.append(words[0])
+            line_num += 1
+
+        logger.info("Data", input_file=key, data=data)
         return {"response": response, "S3OutputFileName": s3_target_key, "originalFileName": key}
 
     except Exception as e:
