@@ -9,6 +9,8 @@ in an automated fashion. It leverages Amazon Route 53 Application Recovery Contr
 using AWS Systems Manager documents, S3 Multi-Region Access Points to provide a unified endpoint for S3 access that 
 spans multiple Region, and DynamoDB Global Tables for persisting batch state and tracking.
 
+The step function based batch processing solution follows the architecture outlined in the AWS Blog article ["Creating AWS Serverless Batch Processing Architectures"](https://aws.amazon.com/blogs/compute/creating-aws-serverless-batch-processing-architectures/). For more details about the inner workings of the processing logic within the step functions, refer to this article.
+
 ## Architecture
 
 ### 1. Operating Batch in Primary Region
