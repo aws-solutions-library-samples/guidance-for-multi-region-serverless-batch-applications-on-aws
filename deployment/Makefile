@@ -13,11 +13,25 @@ EMPTY_LIST='{ "Objects": null }'
 .DEFAULT_GOAL := test-creds
 MAKE=/usr/bin/make
 
+WITNESS_REGION=us-east-2
+NAMING_PREFIX=BatchFailover
+
 global:
 	@echo "Installing global infrastructure Cloudformation stack..."
 	$(eval result:=$(shell aws cloudformation create-stack --stack-name global-base$(ENV) --region $(PRIMARY_REGION) --output text --template-body file://globalResources.yml --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND --parameters ParameterKey=PrimaryRegion,ParameterValue=$(PRIMARY_REGION) ParameterKey=SecondaryRegion,ParameterValue=$(SECONDARY_REGION) ParameterKey=Env,ParameterValue=$(ENV)))
 	@aws cloudformation wait stack-create-complete --stack-name global-base$(ENV) --region $(PRIMARY_REGION)
 	@echo "Finished global infrastructure stack"
+
+active-region-table:
+	@echo "Deploying ActiveRegion DynamoDB Global Table..."
+	$(eval result:=$(shell aws cloudformation create-stack --stack-name active-region-table$(ENV) --region $(PRIMARY_REGION) --output text --template-body file://database/dynamodb/active-region-table.yml --parameters ParameterKey=NamingPrefix,ParameterValue=$(NAMING_PREFIX) ParameterKey=Env,ParameterValue=$(ENV) ParameterKey=PrimaryRegion,ParameterValue=$(PRIMARY_REGION) ParameterKey=SecondaryRegion,ParameterValue=$(SECONDARY_REGION) ParameterKey=WitnessRegion,ParameterValue=$(WITNESS_REGION)))
+	@aws cloudformation wait stack-create-complete --stack-name active-region-table$(ENV) --region $(PRIMARY_REGION)
+	@echo "Finished ActiveRegion table stack"
+
+init-active-region:
+	@echo "Seeding initial Active Region record..."
+	@aws dynamodb put-item --table-name $(NAMING_PREFIX)ActiveRegion$(ENV) --region $(PRIMARY_REGION) --item '{"pk":{"S":"ACTIVE_REGION"},"region":{"S":"$(PRIMARY_REGION)"},"updatedAt":{"S":"'$$(date -u +%Y-%m-%dT%H:%M:%SZ)'"},"updatedBy":{"S":"initial-deployment"}}'
+	@echo "Active Region record seeded with region=$(PRIMARY_REGION)"
 
 primary-vpc:
 	@echo "Installing resources into primary region..."
@@ -63,7 +77,13 @@ chaos-secondary:
 	@aws cloudformation wait stack-create-complete --stack-name chaos$(ENV) --region $(SECONDARY_REGION)
 	@echo "Deploy Complete in Secondary Region!"
 
-deploy: test-creds global primary-vpc secondary-vpc global-routing primary-app secondary-app dashboard
+failover-plan:
+	@echo "Deploying ARC Region Switch Plan..."
+	$(eval result:=$(shell aws cloudformation create-stack --stack-name failover-plan$(ENV) --region $(PRIMARY_REGION) --output text --template-body file://failover.yaml --capabilities CAPABILITY_NAMED_IAM --parameters ParameterKey=Env,ParameterValue=$(ENV) ParameterKey=NamingPrefix,ParameterValue=$(NAMING_PREFIX) ParameterKey=PrimaryRegion,ParameterValue=$(PRIMARY_REGION) ParameterKey=SecondaryRegion,ParameterValue=$(SECONDARY_REGION)))
+	@aws cloudformation wait stack-create-complete --stack-name failover-plan$(ENV) --region $(PRIMARY_REGION)
+	@echo "Finished ARC Region Switch Plan stack"
+
+deploy: test-creds global active-region-table init-active-region primary-vpc secondary-vpc global-routing primary-app secondary-app failover-plan dashboard
 
 chaos: test-creds chaos-primary chaos-secondary
 

@@ -23,8 +23,46 @@ Resources:
     "widgets": [
         {
             "height": 6,
-            "width": 6,
+            "width": 12,
             "y": 0,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "view": "gauge",
+                "metrics": [
+                    [ "MultiRegionBatch${Env}", "ActiveRegionDynamo", "Region", "${PrimaryRegion}", { "label": "${PrimaryRegion}" } ],
+                    [ ".", ".", ".", "${SecondaryRegion}", { "label": "${SecondaryRegion}" } ]
+                ],
+                "region": "${PrimaryRegion}",
+                "title": "Active Region (DynamoDB)",
+                "period": 60,
+                "stat": "Maximum",
+                "yAxis": { "left": { "min": 0, "max": 1 } }
+            }
+        },
+        {
+            "height": 6,
+            "width": 12,
+            "y": 0,
+            "x": 12,
+            "type": "metric",
+            "properties": {
+                "view": "gauge",
+                "metrics": [
+                    [ "MultiRegionBatch${Env}", "ActiveRegionMRAP", "Region", "${PrimaryRegion}", { "label": "${PrimaryRegion}" } ],
+                    [ ".", ".", ".", "${SecondaryRegion}", { "label": "${SecondaryRegion}" } ]
+                ],
+                "region": "${PrimaryRegion}",
+                "title": "Active Region (MRAP Routing)",
+                "period": 60,
+                "stat": "Maximum",
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 6,
             "x": 0,
             "type": "metric",
             "properties": {
@@ -42,7 +80,7 @@ Resources:
         {
             "height": 6,
             "width": 6,
-            "y": 0,
+            "y": 6,
             "x": 6,
             "type": "metric",
             "properties": {
@@ -60,7 +98,7 @@ Resources:
         {
             "height": 6,
             "width": 6,
-            "y": 0,
+            "y": 6,
             "x": 12,
             "type": "metric",
             "properties": {
@@ -80,7 +118,7 @@ Resources:
         {
             "height": 6,
             "width": 6,
-            "y": 0,
+            "y": 6,
             "x": 18,
             "type": "metric",
             "properties": {
@@ -100,7 +138,7 @@ Resources:
         {
             "height": 6,
             "width": 6,
-            "y": 6,
+            "y": 12,
             "x": 0,
             "type": "metric",
             "properties": {
@@ -118,7 +156,7 @@ Resources:
         {
             "type": "metric",
             "x": 6,
-            "y": 6,
+            "y": 12,
             "width": 6,
             "height": 6,
             "properties": {
@@ -136,7 +174,7 @@ Resources:
         {
             "type": "metric",
             "x": 12,
-            "y": 6,
+            "y": 12,
             "width": 6,
             "height": 6,
             "properties": {
@@ -156,7 +194,7 @@ Resources:
         {
             "type": "metric",
             "x": 18,
-            "y": 6,
+            "y": 12,
             "width": 6,
             "height": 6,
             "properties": {
@@ -176,7 +214,7 @@ Resources:
         {
             "type": "metric",
             "x": 6,
-            "y": 12,
+            "y": 18,
             "width": 6,
             "height": 6,
             "properties": {
@@ -194,7 +232,7 @@ Resources:
         {
             "type": "metric",
             "x": 0,
-            "y": 12,
+            "y": 18,
             "width": 6,
             "height": 6,
             "properties": {

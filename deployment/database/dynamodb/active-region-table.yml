@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "ActiveRegion DynamoDB Global Table with Multi-Region Strong Consistency (MRSC)"
+
+Parameters:
+  NamingPrefix:
+    Type: String
+    Default: "BatchFailover"
+    Description: Prefix for resource naming
+  Env:
+    Type: String
+    Default: ""
+    Description: Environment suffix for resource naming
+  PrimaryRegion:
+    Type: String
+    Default: "us-east-1"
+    Description: Primary AWS region for the global table replica
+  SecondaryRegion:
+    Type: String
+    Default: "us-west-2"
+    Description: Secondary AWS region for the global table replica
+  WitnessRegion:
+    Type: String
+    Default: "us-east-2"
+    Description: Witness region for MRSC quorum (must be in the same region set as replicas)
+
+Resources:
+  ActiveRegionTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Properties:
+      TableName: !Sub "${NamingPrefix}ActiveRegion${Env}"
+      BillingMode: PAY_PER_REQUEST
+      MultiRegionConsistency: STRONG
+      AttributeDefinitions:
+        - AttributeName: "pk"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "pk"
+          KeyType: "HASH"
+      Replicas:
+        - Region: !Ref PrimaryRegion
+        - Region: !Ref SecondaryRegion
+      GlobalTableWitnesses:
+        - Region: !Ref WitnessRegion
+      SSESpecification:
+        SSEEnabled: true
+
+Outputs:
+  ActiveRegionTableName:
+    Description: Name of the ActiveRegion DynamoDB Global Table
+    Value: !Ref ActiveRegionTable
+    Export:
+      Name: !Sub "${NamingPrefix}ActiveRegionTableName${Env}"
+  ActiveRegionTableArn:
+    Description: ARN of the ActiveRegion DynamoDB Global Table
+    Value: !GetAtt ActiveRegionTable.Arn
+    Export:
+      Name: !Sub "${NamingPrefix}ActiveRegionTableArn${Env}"

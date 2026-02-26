@@ -30,53 +30,7 @@ Parameters:
     Type: String
     Description: Enter the Secret that contains the source bucket details in the secondary Region.
     Default: "SourceBucket-us-west-2"
-  DomainName:
-    Type: String
-    Description: The name of the domain that you want created as a private hosted zone in Route53
-    Default: demo.io
-
 Resources:
-  HostedZone:
-    Type: AWS::Route53::HostedZone
-    Properties:
-      Name: !Sub ${DomainName}
-      VPCs:
-        - VPCId: !Sub '{{resolve:secretsmanager:VpcId-${PrimaryRegion}${Env}}}'
-          VPCRegion: !Ref PrimaryRegion
-        - VPCId: !Sub '{{resolve:secretsmanager:VpcId-${SecondaryRegion}${Env}}}'
-          VPCRegion: !Ref SecondaryRegion
-  PrimaryRegionRecord:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId: !Ref HostedZone
-      Name: !Sub active.${DomainName}
-      Failover: PRIMARY
-      HealthCheckId: !Sub '{{resolve:ssm:ArcHealthCheckId${Env}}}'
-      Type: TXT
-      SetIdentifier: PrimaryRegion
-      TTL: 60
-      ResourceRecords:
-        - !Sub '"${PrimaryRegion}"'
-  SecondaryRegionRecord:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId: !Ref HostedZone
-      Name: !Sub active.${DomainName}
-      Failover: SECONDARY
-      Type: TXT
-      SetIdentifier: SecondaryRegion
-      TTL: 60
-      ResourceRecords:
-        - !Sub '"${SecondaryRegion}"'
-  DNSRecordSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: !Sub DNSRecordSecret${Env}
-      Description: "Route53 DNS"
-      KmsKeyId: "alias/aws/secretsmanager"
-      SecretString: !Ref PrimaryRegionRecord
-      ReplicaRegions:
-        - Region: !Ref SecondaryRegion
   SourceBucketMRAP:
     Type: AWS::S3::MultiRegionAccessPoint
     Properties:

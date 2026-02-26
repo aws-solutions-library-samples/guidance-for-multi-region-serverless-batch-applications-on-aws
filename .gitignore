@@ -1,6 +1,12 @@
 .idea/*
 .idea
+.kiro
+.venv
+.pytest_cache
+.hypothesis
 .DS_Store
+*.pyc
+__pycache__/
 .aws-sam
 test/*
 /deployment/cfn_nag_scan_results.txt

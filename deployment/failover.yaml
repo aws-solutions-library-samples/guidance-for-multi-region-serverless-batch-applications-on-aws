@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "(SO9169) ARC Region Switch Plan for active/passive failover"
+
+Parameters:
+  Env:
+    Type: String
+    Default: ""
+    Description: Environment suffix for resource naming
+  NamingPrefix:
+    Type: String
+    Default: "BatchFailover"
+    Description: Prefix for resource naming
+  PrimaryRegion:
+    Type: String
+    Default: "us-east-1"
+    Description: Primary AWS region
+  SecondaryRegion:
+    Type: String
+    Default: "us-west-2"
+    Description: Secondary AWS region
+
+Resources:
+  ArcRegionSwitchPlanExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamingPrefix}ArcPlanExecutionRole${Env}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: arc-region-switch.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${PrimaryRegion}:${AWS::AccountId}:function:${NamingPrefix}RegionWriter${Env}"
+                  - !Sub "arn:aws:lambda:${SecondaryRegion}:${AWS::AccountId}:function:${NamingPrefix}RegionWriter${Env}"
+                  - !Sub "arn:aws:lambda:${PrimaryRegion}:${AWS::AccountId}:function:${NamingPrefix}MrapRouting${Env}"
+                  - !Sub "arn:aws:lambda:${SecondaryRegion}:${AWS::AccountId}:function:${NamingPrefix}MrapRouting${Env}"
+
+  ArcRegionSwitchPlan:
+    Type: AWS::ARCRegionSwitch::Plan
+    Properties:
+      Name: !Sub "${NamingPrefix}${Env}"
+      Description: "Active/passive Region Switch Plan for batch processing failover"
+      RecoveryApproach: activePassive
+      PrimaryRegion: !Ref PrimaryRegion
+      Regions:
+        - !Ref PrimaryRegion
+        - !Ref SecondaryRegion
+      ExecutionRole: !GetAtt ArcRegionSwitchPlanExecutionRole.Arn
+      Workflows:
+        # Activate workflow: invoked when a region is becoming the new primary.
+        # Runs in the activating region to update DynamoDB and MRAP routing.
+        - WorkflowTargetAction: activate
+          WorkflowDescription: "Activate region — write active region record and update MRAP routing in the region becoming primary"
+          Steps:
+            - Name: update-active-region-and-mrap
+              ExecutionBlockType: Parallel
+              ExecutionBlockConfiguration:
+                ParallelConfig:
+                  Steps:
+                    - Name: write-active-region
+                      ExecutionBlockType: CustomActionLambda
+                      ExecutionBlockConfiguration:
+                        CustomActionLambdaConfig:
+                          RegionToRun: activatingRegion
+                          TimeoutMinutes: 2
+                          RetryIntervalMinutes: 1
+                          Lambdas:
+                            - Arn: !Sub "arn:aws:lambda:${PrimaryRegion}:${AWS::AccountId}:function:${NamingPrefix}RegionWriter${Env}"
+                            - Arn: !Sub "arn:aws:lambda:${SecondaryRegion}:${AWS::AccountId}:function:${NamingPrefix}RegionWriter${Env}"
+                    - Name: update-mrap-routing
+                      ExecutionBlockType: CustomActionLambda
+                      ExecutionBlockConfiguration:
+                        CustomActionLambdaConfig:
+                          RegionToRun: activatingRegion
+                          TimeoutMinutes: 2
+                          RetryIntervalMinutes: 1
+                          Lambdas:
+                            - Arn: !Sub "arn:aws:lambda:${PrimaryRegion}:${AWS::AccountId}:function:${NamingPrefix}MrapRouting${Env}"
+                            - Arn: !Sub "arn:aws:lambda:${SecondaryRegion}:${AWS::AccountId}:function:${NamingPrefix}MrapRouting${Env}"
+
+Outputs:
+  ArcRegionSwitchPlanArn:
+    Description: ARN of the ARC Region Switch Plan
+    Value: !GetAtt ArcRegionSwitchPlan.Arn
+  ArcRegionSwitchPlanExecutionRoleArn:
+    Description: ARN of the ARC Region Switch Plan execution role
+    Value: !GetAtt ArcRegionSwitchPlanExecutionRole.Arn

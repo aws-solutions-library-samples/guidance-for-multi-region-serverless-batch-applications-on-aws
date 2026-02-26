@@ -6,9 +6,10 @@ import boto3
 import time
 import logging
 from datetime import date, datetime
-import dns.resolver
 from aws_lambda_powertools import Logger, Tracer, Metrics
 from aws_lambda_powertools.metrics import MetricUnit
+
+from active_region_reader import get_active_region, ActiveRegionNotFoundError, DynamoDBReadError
 
 metrics = Metrics()
 tracer = Tracer()
@@ -36,26 +37,18 @@ def write_to_ddb(fileName, status, process_date, start_time, param):
     )
     return response
 
-@tracer.capture_method
-def resolve_secret_value(param):
-    session = boto3.session.Session()
-    client = session.client(
-        service_name='secretsmanager',
-        region_name=os.environ['AWS_REGION'],
-    )
-    get_secret_value_response = client.get_secret_value(
-        SecretId=param
-    )
-    return get_secret_value_response['SecretString']
-
 @metrics.log_metrics(capture_cold_start_metric=False)
 @logger.inject_lambda_context(log_event=True, clear_state=True)
 @tracer.capture_lambda_handler
 def lambda_handler(event, context):
-    domain_name = resolve_secret_value(os.environ['DNS_RECORD_SECRET'])
-    answers = dns.resolver.query(domain_name, 'TXT')
-    primary_region = answers[0].to_text().replace('"', '')
     current_region = os.environ['AWS_REGION']
+    try:
+        primary_region = get_active_region(os.environ['ACTIVE_REGION_TABLE'])
+    except (ActiveRegionNotFoundError, DynamoDBReadError) as exc:
+        logger.error("Failed to read active region, aborting execution", extra={"error": str(exc)})
+        metrics.add_metric(name="ActiveRegionReadFailure", unit=MetricUnit.Count, value=1)
+        return
+
     logger.info({"Primary Region": primary_region, "Current Region": current_region})
     if current_region == primary_region:
         for record in event['Records']:

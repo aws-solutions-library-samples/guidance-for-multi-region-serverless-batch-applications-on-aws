@@ -49,6 +49,14 @@ Parameters:
     Type: String
     Description: The AWS AccountId where the PowerTools Python Lambda Layer is hosted
     Default: 017000801446
+  NamingPrefix:
+    Type: String
+    Default: "BatchFailover"
+    Description: Prefix for resource naming
+  SecondaryRegion:
+    Type: String
+    Description: Enter the Secondary Region
+    Default: "us-west-2"
 
 Conditions:
   isPrimaryRegion: !Equals
@@ -567,42 +575,153 @@ Resources:
       LogGroupName: !Sub /aws/lambda/${ValidateDataFunction}
       RetentionInDays: 7
 
-  AutomationRegionalFailoverFunction:
+  ##### Region Writer Lambda #######
+  RegionWriterFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${NamingPrefix}RegionWriter${Env}"
       Layers:
         - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
       Tracing: Active
-      FunctionName: !Sub AutomationRegionalFailoverFunction${Env}
-      CodeUri: ../source/failover/
-      Handler: app.lambda_handler
+      CodeUri: ../source/region-writer/
+      Handler: app.handler
       Runtime: python3.9
+      MemorySize: 256
+      Timeout: 120
       Policies:
         - Version: '2012-10-17'
           Statement:
             - Effect: Allow
               Action:
-                - "route53-recovery-cluster:*"
-                - "route53-recovery-control-config:*"
+                - dynamodb:PutItem
+                - dynamodb:GetItem
               Resource:
-                - !Sub 'arn:aws:route53-recovery-control::${AWS::AccountId}:cluster/*'
-                - !Sub 'arn:aws:route53-recovery-control::${AWS::AccountId}:controlpanel/*'
-                - !Sub 'arn:aws:route53-recovery-control::${AWS::AccountId}:controlpanel/*/routingcontrol/*'
+                - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${NamingPrefix}ActiveRegion${Env}"
       Environment:
         Variables:
-          POWERTOOLS_SERVICE_NAME: !Sub 'AutomationRegionalFailoverFunction${Env}'
-          POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
+          ACTIVE_REGION_TABLE: !Sub "${NamingPrefix}ActiveRegion${Env}"
+          POWERTOOLS_SERVICE_NAME: !Sub "RegionWriterFunction${Env}"
+          POWERTOOLS_METRICS_NAMESPACE: !Sub "MultiRegionBatch${Env}"
           LOG_LEVEL: INFO
-          ARC_ROUTING_CONTROL_ARN: !Sub '{{resolve:secretsmanager:ArcRoutingControlSecret${Env}}}'
-          ARC_CLUSTER_ENDPOINTS: !Sub '{{resolve:secretsmanager:ArcClusterEndpoints${Env}}}'
 
-  AutomationRegionalFailoverFunctionLogGroup:
-    DependsOn: AutomationRegionalFailoverFunction
+  RegionWriterFunctionLogGroup:
+    DependsOn: RegionWriterFunction
     Type: AWS::Logs::LogGroup
     Properties:
       KmsKeyId: !GetAtt LogGroupKey.Arn
-      LogGroupName: !Sub /aws/lambda/${AutomationRegionalFailoverFunction}
+      LogGroupName: !Sub /aws/lambda/${RegionWriterFunction}
       RetentionInDays: 7
+
+  ##### MRAP Routing Lambda #######
+  MrapRoutingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${NamingPrefix}MrapRouting${Env}"
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/mrap-routing/
+      Handler: app.handler
+      Runtime: python3.9
+      MemorySize: 256
+      Timeout: 120
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetMultiRegionAccessPoint
+                - s3:GetMultiRegionAccessPointRoutes
+                - s3:SubmitMultiRegionAccessPointRoutes
+              Resource:
+                - !Sub "arn:aws:s3::${AWS::AccountId}:accesspoint/*"
+      Environment:
+        Variables:
+          ACCOUNT_ID: !Ref "AWS::AccountId"
+          MRAP_ARN: !Sub "{{resolve:secretsmanager:SourceBucketMRAPSecret${Env}}}"
+          PRIMARY_REGION: !Ref PrimaryRegion
+          SECONDARY_REGION: !Ref SecondaryRegion
+          PRIMARY_BUCKET: !Sub "{{resolve:secretsmanager:SourceBucket-${PrimaryRegion}${Env}:SecretString:SourceBucket}}"
+          SECONDARY_BUCKET: !Sub "{{resolve:secretsmanager:SourceBucket-${SecondaryRegion}${Env}:SecretString:SourceBucket}}"
+          POWERTOOLS_SERVICE_NAME: !Sub "MrapRoutingFunction${Env}"
+          POWERTOOLS_METRICS_NAMESPACE: !Sub "MultiRegionBatch${Env}"
+          LOG_LEVEL: INFO
+
+  MrapRoutingFunctionLogGroup:
+    DependsOn: MrapRoutingFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${MrapRoutingFunction}
+      RetentionInDays: 7
+
+  ##### Active Region Monitor Lambda #######
+  ActiveRegionMonitorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${NamingPrefix}ActiveRegionMonitor${Env}"
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/active-region-monitor/
+      Handler: app.handler
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 30
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${NamingPrefix}ActiveRegion${Env}"
+            - Effect: Allow
+              Action:
+                - s3:GetMultiRegionAccessPoint
+                - s3:GetMultiRegionAccessPointRoutes
+              Resource:
+                - !Sub "arn:aws:s3::${AWS::AccountId}:accesspoint/*"
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: "*"
+      Environment:
+        Variables:
+          ACTIVE_REGION_TABLE: !Sub "${NamingPrefix}ActiveRegion${Env}"
+          ACCOUNT_ID: !Ref "AWS::AccountId"
+          MRAP_ALIAS: !Sub "{{resolve:secretsmanager:SourceBucketMRAPSecret${Env}}}"
+          PRIMARY_REGION: !Ref PrimaryRegion
+          SECONDARY_REGION: !Sub "${SecondaryRegion}"
+          POWERTOOLS_SERVICE_NAME: !Sub "ActiveRegionMonitor${Env}"
+          POWERTOOLS_METRICS_NAMESPACE: !Sub "MultiRegionBatch${Env}"
+          LOG_LEVEL: INFO
+
+  ActiveRegionMonitorFunctionLogGroup:
+    DependsOn: ActiveRegionMonitorFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${ActiveRegionMonitorFunction}
+      RetentionInDays: 7
+
+  ActiveRegionMonitorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamingPrefix}ActiveRegionMonitorSchedule${Env}"
+      ScheduleExpression: "rate(1 minute)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ActiveRegionMonitorFunction.Arn
+          Id: ActiveRegionMonitorTarget
+
+  ActiveRegionMonitorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ActiveRegionMonitorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ActiveRegionMonitorSchedule.Arn
 
   S3NotificationLambdaFunction:
     Type: AWS::Serverless::Function
@@ -627,6 +746,13 @@ Resources:
             TableName: !Sub '{{resolve:secretsmanager:BatchStateTableNameSecret${Env}}}'
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${NamingPrefix}ActiveRegion${Env}"
       Environment:
         Variables:
           STATE_MACHINE_EXECUTION_NAME: "BlogBatchMainOrchestrator"
@@ -635,7 +761,7 @@ Resources:
           FILE_DELIMITER: !Ref FileDelimiter
           STATE_MACHINE_ARN: !GetAtt BlogBatchMainOrchestrator.Arn
           BATCH_STATE_DDB: !Sub '{{resolve:secretsmanager:BatchStateTableNameSecret${Env}}}'
-          DNS_RECORD_SECRET: !Sub DNSRecordSecret${Env}
+          ACTIVE_REGION_TABLE: !Sub "${NamingPrefix}ActiveRegion${Env}"
           POWERTOOLS_SERVICE_NAME: !Sub 'S3NotificationLambdaFunction${Env}'
           POWERTOOLS_METRICS_NAMESPACE: !Sub 'MultiRegionBatch${Env}'
           LOG_LEVEL: INFO
@@ -748,69 +874,3 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       KmsMasterKeyId: alias/aws/sns
-
-  AutomationFailoverRunbook:
-    Type: AWS::SSM::Document
-    Properties:
-      Name: 'AutomationFailoverRunbook'
-      DocumentType: Automation
-      DocumentFormat: YAML
-      Content:
-        description: |-
-          *Runbook for Batch Failover*
-
-          ---
-          # Runbook for Batch Failover
-
-          1. Get Current Routing Control State
-          2. Rotate Arc Controls
-          3. Wait for DNS Cache Refresh and S3 CRR
-          4. Trigger Reconciliation
-        schemaVersion: '0.3'
-        assumeRole: !Sub 'arn:aws:iam::${AWS::AccountId}:role/AutomationServiceRole${Env}'
-        mainSteps:
-          - name: GetRoutingControlState
-            action: 'aws:invokeLambdaFunction'
-            maxAttempts: 1
-            timeoutSeconds: 120
-            onFailure: Abort
-            inputs:
-              FunctionName: !Ref AutomationRegionalFailoverFunction
-              InputPayload:
-                FUNCTION: get_current_routing_control_state
-            outputs:
-              - Name: CURRENT_ROUTING_CONTROL_STATE
-                Selector: $.Payload.routing_control_state
-                Type: String
-          - name: RotateArcControls
-            action: 'aws:invokeLambdaFunction'
-            maxAttempts: 1
-            timeoutSeconds: 120
-            onFailure: Abort
-            inputs:
-              FunctionName: !Ref AutomationRegionalFailoverFunction
-              InputPayload:
-                FUNCTION: rotate_arc_controls
-                CURRENT_ROUTING_CONTROL_STATE: '{{GetRoutingControlState.CURRENT_ROUTING_CONTROL_STATE}}'
-            outputs:
-              - Name: UPDATED_ROUTING_CONTROL_STATE
-                Selector: $.Payload.routing_control_state
-                Type: String
-          - name: WaitForDNSCacheRefresh
-            action: aws:sleep
-            inputs:
-              Duration: PT15M
-          - name: TriggerReconciliation
-            action: 'aws:invokeLambdaFunction'
-            maxAttempts: 1
-            timeoutSeconds: 60
-            onFailure: Abort
-            inputs:
-              FunctionName: !Ref AutomationReconciliationFunction
-            outputs:
-              - Name: NUMBER_OF_FILES_SUBMITTED_FOR_RECONCILIATION
-                Selector: $.Payload.num_files_submitted_for_reconciliation
-                Type: Integer
-              - Name: FILE_NAMES_FOR_RECONCILIATION
-                Selector: $.Payload.file_list
-                Type: StringList
