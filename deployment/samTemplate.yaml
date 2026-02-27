@@ -870,6 +870,51 @@ Resources:
       NotificationId: S3ObjectCreatedEvent
       FinancialTableName: !Ref FinancialTable
 
+  ##### Delayed Reconciliation State Machine #######
+  DelayedReconciliationStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${NamingPrefix}DelayedReconciliation${Env}"
+      Tracing:
+        Enabled: true
+      DefinitionUri: ../source/statemachine/delayed-reconciliation.json
+      DefinitionSubstitutions:
+        ReconciliationFunctionArn: !GetAtt AutomationReconciliationFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AutomationReconciliationFunction
+
+  ##### Reconciliation Trigger Lambda #######
+  ReconciliationTriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${NamingPrefix}ReconciliationTrigger${Env}"
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${PowerToolsLambdaLayerAccountId}:layer:AWSLambdaPowertoolsPythonV2:20
+      Tracing: Active
+      CodeUri: ../source/reconciliation-trigger/
+      Handler: app.handler
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 30
+      Policies:
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt DelayedReconciliationStateMachine.Name
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !GetAtt DelayedReconciliationStateMachine.Arn
+          POWERTOOLS_SERVICE_NAME: !Sub "ReconciliationTrigger${Env}"
+          POWERTOOLS_METRICS_NAMESPACE: !Sub "MultiRegionBatch${Env}"
+          LOG_LEVEL: INFO
+
+  ReconciliationTriggerFunctionLogGroup:
+    DependsOn: ReconciliationTriggerFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      LogGroupName: !Sub /aws/lambda/${ReconciliationTriggerFunction}
+      RetentionInDays: 7
+
   SNSTopic:
     Type: AWS::SNS::Topic
     Properties:

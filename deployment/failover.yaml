@@ -39,11 +39,14 @@ Resources:
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
+                  - lambda:GetFunction
                 Resource:
                   - !Sub "arn:aws:lambda:${PrimaryRegion}:${AWS::AccountId}:function:${NamingPrefix}RegionWriter${Env}"
                   - !Sub "arn:aws:lambda:${SecondaryRegion}:${AWS::AccountId}:function:${NamingPrefix}RegionWriter${Env}"
                   - !Sub "arn:aws:lambda:${PrimaryRegion}:${AWS::AccountId}:function:${NamingPrefix}MrapRouting${Env}"
                   - !Sub "arn:aws:lambda:${SecondaryRegion}:${AWS::AccountId}:function:${NamingPrefix}MrapRouting${Env}"
+                  - !Sub "arn:aws:lambda:${PrimaryRegion}:${AWS::AccountId}:function:${NamingPrefix}ReconciliationTrigger${Env}"
+                  - !Sub "arn:aws:lambda:${SecondaryRegion}:${AWS::AccountId}:function:${NamingPrefix}ReconciliationTrigger${Env}"
 
   ArcRegionSwitchPlan:
     Type: AWS::ARCRegionSwitch::Plan
@@ -87,6 +90,16 @@ Resources:
                           Lambdas:
                             - Arn: !Sub "arn:aws:lambda:${PrimaryRegion}:${AWS::AccountId}:function:${NamingPrefix}MrapRouting${Env}"
                             - Arn: !Sub "arn:aws:lambda:${SecondaryRegion}:${AWS::AccountId}:function:${NamingPrefix}MrapRouting${Env}"
+            - Name: trigger-delayed-reconciliation
+              ExecutionBlockType: CustomActionLambda
+              ExecutionBlockConfiguration:
+                CustomActionLambdaConfig:
+                  RegionToRun: activatingRegion
+                  TimeoutMinutes: 2
+                  RetryIntervalMinutes: 1
+                  Lambdas:
+                    - Arn: !Sub "arn:aws:lambda:${PrimaryRegion}:${AWS::AccountId}:function:${NamingPrefix}ReconciliationTrigger${Env}"
+                    - Arn: !Sub "arn:aws:lambda:${SecondaryRegion}:${AWS::AccountId}:function:${NamingPrefix}ReconciliationTrigger${Env}"
 
 Outputs:
   ArcRegionSwitchPlanArn:

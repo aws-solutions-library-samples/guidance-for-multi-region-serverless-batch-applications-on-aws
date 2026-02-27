@@ -1,0 +1,26 @@
+{
+  "Comment": "Wait for S3 replication lag then run reconciliation",
+  "StartAt": "Wait for S3 Replication",
+  "States": {
+    "Wait for S3 Replication": {
+      "Type": "Wait",
+      "Seconds": 900,
+      "Next": "Run Reconciliation"
+    },
+    "Run Reconciliation": {
+      "Type": "Task",
+      "Resource": "${ReconciliationFunctionArn}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true
+    }
+  }
+}
