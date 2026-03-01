@@ -10,3 +10,4 @@ __pycache__/
 .aws-sam
 test/*
 /deployment/cfn_nag_scan_results.txt
+.ash/
